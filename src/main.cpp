@@ -1,9 +1,14 @@
 /*
+Teensy32 microROS ToF
+Author(s): Luke Strohbehn
 
 Connection reset code from: https://github.com/micro-ROS/micro_ros_arduino/blob/humble/examples/micro-ros_reconnection_example/micro-ros_reconnection_example.ino
 */
 
 #include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_VL53L0X.h>
+
 #include <micro_ros_platformio.h>
 
 #include <stdio.h>
@@ -28,7 +33,18 @@ rcl_timer_t timer;
 
 const int led_pin = 13;
 unsigned long last_time = 0;
+const uint8_t xshutpins[2] = {11, 12};
+const uint8_t num_devices = sizeof(xshutpins) / sizeof(xshutpins[0]);
 
+// VL53L0X setup
+Adafruit_VL53L0X tof0 = Adafruit_VL53L0X();
+Adafruit_VL53L0X tof1 = Adafruit_VL53L0X();
+uint32_t tof0_addr = 0x2A;
+uint32_t tof1_addr = 0x2B;
+VL53L0X_RangingMeasurementData_t tofdata0;
+VL53L0X_RangingMeasurementData_t tofdata1;
+
+// microROS system state
 enum SystemState {
     AGENT_WAIT,
     AGENT_AVAILABLE,
@@ -40,7 +56,8 @@ void error_loop(void) {
     /* Error loop LED indicator */
     while (true) {
         digitalWrite(led_pin, !digitalRead(led_pin));
-        delay(1000);
+        delay(50);
+        Serial.println(F("err"));
     }
 }
 
@@ -49,8 +66,6 @@ void timer_callback(rcl_timer_t* timer, int64_t last_call_time) {
     RCLC_UNUSED(last_call_time);
     if (timer != NULL) {
         RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
-        msg.tof0 += 0.01;
-        msg.tof1 += 1.0;
     }
 }
 
@@ -63,14 +78,16 @@ bool create_rcl_entities() {
     RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
     
     // create node
-    RCCHECK(rclc_node_init_default(&node, "teensy32_microros", "", &support));
+    const char* name_space = "microROS";
+    const char* node_name = "teensy32";
+    RCCHECK(rclc_node_init_default(&node, node_name, name_space, &support));
 
     // create publisher
     RCCHECK(rclc_publisher_init_default(
         &publisher,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(teensy32_tof_msgs, msg, ToFData),
-        "microROS/tof_data"
+        "tof_data"
     ));
     
     // create timer
@@ -116,12 +133,58 @@ void execute_every_n_ms(int64_t ms, SystemState system_state) {
     while (0);
 }
 
+void reset_tof_sensors() {
+    /* Get the I2C ToF sensors ready to read data */
+    // Disable everything by driving XSHUT pins low
+    for (int8_t i=0; i<num_devices; ++i) {
+        pinMode(xshutpins[i], OUTPUT);
+        digitalWrite(xshutpins[i], LOW);
+    }
+    delay(10);
+    for (int8_t i=0; i<num_devices; ++i) {
+        digitalWrite(xshutpins[i], HIGH);
+    }
+    delay(10);
+    
+    // Activate the first sensor
+    digitalWrite(xshutpins[1], LOW);
+    if (!tof0.begin(tof0_addr)) {
+        error_loop();
+    }
+    delay(10);
+
+    // Activate the second sensor
+    digitalWrite(xshutpins[1], HIGH);
+    delay(10);
+    if (!tof1.begin(tof1_addr)) {
+        error_loop();
+    }
+}
+
+void read_tof_sensors() {
+    tof0.rangingTest(&tofdata0);
+    tof1.rangingTest(&tofdata1);
+
+    if (tofdata0.RangeStatus != 4) { // if not out of range
+        msg.tof0 = tofdata0.RangeMilliMeter;
+    }
+    if (tofdata1.RangeStatus != 4) {
+        msg.tof1 = tofdata1.RangeMilliMeter;
+    }
+}
+
 void setup() {
+    pinMode(led_pin, OUTPUT);
+    digitalWrite(led_pin, HIGH);
+    digitalWrite(led_pin, HIGH);
+
+    Wire.begin();
+    Wire.setClock(400000);
+    reset_tof_sensors();
+
+    // Serial
     Serial.begin(115200);
     set_microros_serial_transports(Serial); // PlatformIO
-
-    pinMode(led_pin, OUTPUT);
-    digitalWrite(led_pin, LOW);
 
     system_state = AGENT_WAIT;
 
@@ -130,6 +193,9 @@ void setup() {
 }
 
 void loop() {
+    // Read from ToF sensors
+    read_tof_sensors();
+
     // Check system state for connection status to micro_ros_agent
     switch (system_state) {
         case AGENT_WAIT:
