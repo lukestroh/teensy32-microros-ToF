@@ -19,12 +19,14 @@ Connection reset code from: https://github.com/micro-ROS/micro_ros_arduino/blob/
 
 #include <std_msgs/msg/int32.h>
 #include <teensy32_tof_msgs/msg/to_f_data.h>
+#include <teensy32_tof_msgs/msg/to_f_data_array.h>
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)){}}
 
 rcl_publisher_t publisher;
 teensy32_tof_msgs__msg__ToFData msg;
+teensy32_tof_msgs__msg__ToFDataArray msg_arr;
 rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -39,10 +41,12 @@ const uint8_t num_devices = sizeof(xshutpins) / sizeof(xshutpins[0]);
 // VL53L0X setup
 Adafruit_VL53L0X tof0 = Adafruit_VL53L0X();
 Adafruit_VL53L0X tof1 = Adafruit_VL53L0X();
+Adafruit_VL53L0X tofs[2] = {tof0, tof1};
 uint32_t tof0_addr = 0x2A;
 uint32_t tof1_addr = 0x2B;
 VL53L0X_RangingMeasurementData_t tofdata0;
 VL53L0X_RangingMeasurementData_t tofdata1;
+VL53L0X_RangingMeasurementData_t data_structs[2];
 
 // microROS system state
 enum SystemState {
@@ -52,13 +56,18 @@ enum SystemState {
     AGENT_DISCONNECTED
 } system_state;
 
+// Software reset
+void (* reset_cpu)(void) = 0;
+
 void error_loop(void) {
-    /* Error loop LED indicator */
-    while (true) {
+    /* Error loop LED indicator */ 
+    Serial.println(F("Error, resetting in 5s... "));
+    uint32_t time = millis();
+    while (millis() - time < 5000) {
         digitalWrite(led_pin, !digitalRead(led_pin));
         delay(50);
-        Serial.println(F("err"));
     }
+    reset_cpu();
 }
 
 void timer_callback(rcl_timer_t* timer, int64_t last_call_time) {
@@ -78,17 +87,23 @@ bool create_rcl_entities() {
     RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
     
     // create node
-    const char* name_space = "microROS";
-    const char* node_name = "teensy32";
-    RCCHECK(rclc_node_init_default(&node, node_name, name_space, &support));
+    const char* _namespace = "microROS";
+    const char* _node_name = "teensy32";
+    RCCHECK(rclc_node_init_default(&node, _node_name, _namespace, &support));
 
     // create publisher
+    // RCCHECK(rclc_publisher_init_default(
+    //     &publisher,
+    //     &node,
+    //     ROSIDL_GET_MSG_TYPE_SUPPORT(teensy32_tof_msgs, msg, ToFData),
+    //     "tof_data"
+    // ));
     RCCHECK(rclc_publisher_init_default(
         &publisher,
         &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(teensy32_tof_msgs, msg, ToFData),
-        "tof_data"
-    ));
+        ROSIDL_GET_MSG_TYPE_SUPPORT(teensy32_tof_msgs, msg, ToFDataArray),
+        "tof_data_array"
+    ))
     
     // create timer
     const unsigned int timer_period {10};
@@ -165,62 +180,97 @@ void read_tof_sensors() {
     tof0.rangingTest(&tofdata0);
     tof1.rangingTest(&tofdata1);
 
+    /* Hardcode method */
+    
     if (tofdata0.RangeStatus != 4) { // if not out of range
-        msg.tof0 = tofdata0.RangeMilliMeter;
+        // msg.tof0 = tofdata0.RangeMilliMeter;
+        msg_arr.data[0] = tofdata0.RangeMilliMeter;
+    }
+    else {
+        // msg.tof0 = -1;
+        msg_arr.data[0] = -1;
     }
     if (tofdata1.RangeStatus != 4) {
-        msg.tof1 = tofdata1.RangeMilliMeter;
+        // msg.tof1 = tofdata1.RangeMilliMeter;
+        msg_arr.data[1] = tofdata1.RangeMilliMeter;
+
+    }
+    else {
+        // msg.tof1 = -1;
+        msg_arr.data[1] = -1;
+    }
+
+
+    
+
+    /* Loop method! */
+    int i = 0;
+    for (auto& data_struct : data_structs) {
+        
+        Serial.println(data_struct.RangeStatus);
+        if (data_struct.RangeStatus != 4) {
+            msg_arr.data[i] = data_struct.RangeMilliMeter;
+        }
+        else {
+            msg_arr.data[i] = -1;
+        }
+        ++i;
     }
 }
 
 void setup() {
     pinMode(led_pin, OUTPUT);
     digitalWrite(led_pin, HIGH);
-    digitalWrite(led_pin, HIGH);
 
+    // I2C setup
     Wire.begin();
     Wire.setClock(400000);
     reset_tof_sensors();
 
-    // Serial
+    // Serial setup
     Serial.begin(115200);
     set_microros_serial_transports(Serial); // PlatformIO
 
     system_state = AGENT_WAIT;
 
-    msg.tof0 = 0.0;
-    msg.tof1 = 0.0;
+    // msg.tof0 = 0.0;
+    // msg.tof1 = 0.0;
+    msg_arr.data[0] = 10.0;
+    msg_arr.data[1] = 10.0;
+    
 }
 
 void loop() {
     // Read from ToF sensors
     read_tof_sensors();
 
-    // Check system state for connection status to micro_ros_agent
-    switch (system_state) {
-        case AGENT_WAIT:
-            execute_every_n_ms(500, system_state = (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) ? AGENT_AVAILABLE : AGENT_WAIT);
-            break;
-        case AGENT_AVAILABLE:
-            system_state = (true == create_rcl_entities()) ? AGENT_CONNECTED : AGENT_WAIT;
-            if (system_state == AGENT_WAIT) {
-                destroy_rcl_entities();
-            }
-            break;
-        case AGENT_CONNECTED:
-            // Publish message
-            execute_every_n_ms(200, system_state = (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) ? AGENT_CONNECTED : AGENT_DISCONNECTED);
-            if (system_state == AGENT_CONNECTED) {
-                RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
-            }
-            break;
-        case AGENT_DISCONNECTED:
-            destroy_rcl_entities();
-            system_state = AGENT_WAIT;
-            break;
-        default:
-            break;
-    }
+    Serial.println(msg_arr.data[0]);
+
+    // // Check system state for connection status to micro_ros_agent
+    // switch (system_state) {
+    //     case AGENT_WAIT:
+    //         execute_every_n_ms(500, system_state = (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) ? AGENT_AVAILABLE : AGENT_WAIT);
+    //         break;
+    //     case AGENT_AVAILABLE:
+    //         system_state = (true == create_rcl_entities()) ? AGENT_CONNECTED : AGENT_WAIT;
+    //         if (system_state == AGENT_WAIT) {
+    //             destroy_rcl_entities();
+    //         }
+    //         break;
+    //     case AGENT_CONNECTED:
+    //         // Publish message
+    //         execute_every_n_ms(200, system_state = (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) ? AGENT_CONNECTED : AGENT_DISCONNECTED);
+    //         if (system_state == AGENT_CONNECTED) {
+    //             RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
+    //         }
+    //         break;
+    //     case AGENT_DISCONNECTED:
+    //         destroy_rcl_entities();
+    //         system_state = AGENT_WAIT;
+    //         break;
+    //     default:
+    //         break;
+    // }
 
     // LED control
     if (system_state == AGENT_CONNECTED) {

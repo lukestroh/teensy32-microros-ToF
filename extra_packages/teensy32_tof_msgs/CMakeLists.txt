@@ -11,7 +11,8 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(
   ${PROJECT_NAME}
-  "msg/ToFData.msg"  
+  "msg/ToFData.msg"
+  "msg/ToFDataArray.msg"  
 )
 
 if(BUILD_TESTING)
