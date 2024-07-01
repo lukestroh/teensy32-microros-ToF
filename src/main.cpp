@@ -26,7 +26,6 @@ Connection reset code from: https://github.com/micro-ROS/micro_ros_arduino/blob/
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)){}}
 
 rcl_publisher_t publisher;
-teensy32_tof_msgs__msg__ToFData msg;
 teensy32_tof_msgs__msg__ToFDataArray msg_arr;
 rclc_executor_t executor;
 rclc_support_t support;
@@ -56,13 +55,7 @@ const uint8_t xshutpins[2] = {11, 12};
 // VL53L0X setup
 Adafruit_VL53L0X tof0 = Adafruit_VL53L0X();
 Adafruit_VL53L0X tof1 = Adafruit_VL53L0X();
-Adafruit_VL53L0X tofs[2] = {tof0, tof1};
-uint32_t tof0_addr = 0x2A;
-uint32_t tof1_addr = 0x2B;
-uint32_t tof_addrs[2] = {tof0_addr, tof1_addr};
-VL53L0X_RangingMeasurementData_t tofdata0;
-VL53L0X_RangingMeasurementData_t tofdata1;
-VL53L0X_RangingMeasurementData_t data_structs[2];
+Adafruit_VL53L0X* tofs[2] = {&tof0, &tof1}; // add more sensors here
 
 typedef struct {
     Adafruit_VL53L0X *psensor; // pointer to sensor object
@@ -91,25 +84,23 @@ enum SystemState {
     AGENT_DISCONNECTED
 } system_state;
 
-// Software reset
-void (* reset_cpu)(void) = 0; // this doesn't work!
 
 void error_loop(void) {
     /* Error loop LED indicator */
-    Serial.println(F("Error, resetting in 5s... "));
+    Serial.println(F("Error loop... "));
     uint32_t time = millis();
     while (millis() - time < 5000) {
         digitalWrite(led_pin, !digitalRead(led_pin));
         delay(50);
     }
-    reset_cpu();
+    // reset_cpu();
 }
 
 void timer_callback(rcl_timer_t* timer, int64_t last_call_time) {
     /* Publisher timer callback method */
     RCLC_UNUSED(last_call_time);
     if (timer != NULL) {
-        RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
+        RCSOFTCHECK(rcl_publish(&publisher, &msg_arr, NULL));
     }
 }
 
@@ -127,18 +118,12 @@ bool create_rcl_entities() {
     RCCHECK(rclc_node_init_default(&node, _node_name, _namespace, &support));
 
     // create publisher
-    // RCCHECK(rclc_publisher_init_default(
-    //     &publisher,
-    //     &node,
-    //     ROSIDL_GET_MSG_TYPE_SUPPORT(teensy32_tof_msgs, msg, ToFData),
-    //     "tof_data"
-    // ));
     RCCHECK(rclc_publisher_init_default(
         &publisher,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(teensy32_tof_msgs, msg, ToFDataArray),
         "tof_data_array"
-    ))
+    ));
     
     // create timer
     const unsigned int timer_period {10};
@@ -186,31 +171,6 @@ void execute_every_n_ms(int64_t ms, SystemState system_state) {
 void reset_tof_sensors() {
     /* Get the I2C ToF sensors ready to read data */
     // Disable everything by driving XSHUT pins low
-    
-    // for (int8_t i=0; i<num_sensors; ++i) {
-    //     pinMode(xshutpins[i], OUTPUT);
-    //     digitalWrite(xshutpins[i], LOW);
-    // }
-    // delay(10);
-    // for (int8_t i=0; i<num_sensors; ++i) {
-    //     digitalWrite(xshutpins[i], HIGH);
-    // }
-    // delay(10);
-    
-    // // Activate the first sensor
-    // digitalWrite(xshutpins[1], LOW);
-    // if (!tof0.begin(tof0_addr)) {
-    //     error_loop();
-    // }
-    // delay(10);
-
-    // // Activate the second sensor
-    // digitalWrite(xshutpins[1], HIGH);
-    // delay(10);
-    // if (!tof1.begin(tof1_addr)) {
-    //     error_loop();
-    // }
-    // delay(10);
 
     // shudown all sensors
     for (uint8_t i=0; i<num_sensors; ++i) {
@@ -218,35 +178,37 @@ void reset_tof_sensors() {
     }
     delay(10);
 
+    // Enable sensors one by one with respective addresses
     for (uint8_t i=0; i<num_sensors; ++i) {
         digitalWrite(sensors[i].shutdown_pin, HIGH);
-        delay(10);
-        if (!sensors[i].psensor->begin(sensors[i].id, false, sensors[i].pwire, sensors[i].sensor_config)) {
+        delay(100);
+        if (!sensors[i].psensor->begin(sensors[i].id,
+                                       false,
+                                       sensors[i].pwire,
+                                       sensors[i].sensor_config
+                                    )) {
             error_loop();
-        }
-        
+        } 
     }
-
-
-    // for (int8_t i=0; i<num_sensors; ++i) {
-    //     digitalWrite(xshutpins[i], HIGH);
-    //     delay(10);
-    //     if (!tofs[i].begin(tof_addrs[i])) {
-    //         error_loop(); // resets the device and continuously tries again
-    //     }
-    //     delay(10);
-    // }
 }
 
 void read_tof_sensors() {
-    /* Read each sensor and store in data struct */
+    /* Read each sensor and store in message struct 
+        TODO: Make stamped??
+    */
     for (uint8_t i=0; i<num_sensors; ++i) {
-        tofs[i].rangingTest(&(data_structs[i]));
-        if (data_structs[i].RangeStatus != 4) {
-            msg_arr.data[i] = data_structs[i].RangeMilliMeter;
+        // Serial.println((uint32_t)tofs[i]);
+        // (*tofs[i]).rangingTest(&(data_structs[i]), true);
+        uint16_t range = sensors[i].psensor->readRange();
+        bool timeout = sensors[i].psensor->timeoutOccurred();
+        // sensors[i].psensor->
+        uint32_t time = millis();
+
+        if (timeout) {
+            msg_arr.data[i] = -1;
         }
         else {
-            msg_arr.data[i] = -1;
+            msg_arr.data[i] = static_cast<float>(range);
         }
     }
 }
@@ -258,6 +220,7 @@ void setup() {
     // I2C setup
     Wire.begin();
     Wire.setClock(400000);
+    delay(10);
     reset_tof_sensors();
 
     // Serial setup
@@ -266,19 +229,17 @@ void setup() {
 
     system_state = AGENT_WAIT;
 
-    // msg.tof0 = 0.0;
-    // msg.tof1 = 0.0;
     msg_arr.data[0] = 0.0;
     msg_arr.data[1] = 0.0;
-    
 }
 
 void loop() {
-    Serial.println("Hello world");
     // Read from ToF sensors
     read_tof_sensors();
 
+    Serial.print(F("Tof0: "));
     Serial.println(msg_arr.data[0]);
+    Serial.print(F("Tof1: "));
     Serial.println(msg_arr.data[1]);
 
     // // Check system state for connection status to micro_ros_agent
@@ -307,17 +268,17 @@ void loop() {
     //         break;
     // }
 
-    // LED control
-    if (system_state == AGENT_CONNECTED) {
-            unsigned long now = millis();
-        if (now - last_time > 9900) {
-            digitalWrite(led_pin, HIGH); 
-        }
-        if (now - last_time > 10000) {
-            digitalWrite(led_pin, LOW); 
-            last_time = now;
-        }
-    }     
+    // // LED control
+    // if (system_state == AGENT_CONNECTED) {
+    //         unsigned long now = millis();
+    //     if (now - last_time > 9900) {
+    //         digitalWrite(led_pin, HIGH); 
+    //     }
+    //     if (now - last_time > 10000) {
+    //         digitalWrite(led_pin, LOW); 
+    //         last_time = now;
+    //     }
+    // }     
 }
 
 /* Running this script:
